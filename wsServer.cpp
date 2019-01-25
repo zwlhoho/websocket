@@ -37,6 +37,53 @@ ssize_t read_data(int fd, char *buf, unsigned int buf_size) {
     return readlen;
 }
 
+ssize_t ws_write_frame(int fd, WS_OPCODE oc, void *data, size_t bytes) {
+	uint8_t hdr[14] = { 0 };
+	size_t hlen = 2;
+	uint8_t *bp;
+	ssize_t raw_ret = 0;
+
+	if (ESTABLISHED != g_clientState[fd]) {
+		return -1;
+	}
+
+	hdr[0] = (uint8_t)(oc | 0x80);
+
+	if (bytes < 126) {
+		hdr[1] = (uint8_t)bytes;
+	} else if (bytes < 0x10000) {
+		uint16_t *u16;
+
+		hdr[1] = 126;
+		hlen += 2;
+		u16 = (uint16_t *) &hdr[2];
+		*u16 = htons((uint16_t) bytes);
+	} else {
+		uint64_t *u64;
+
+		hdr[1] = 127;
+		hlen += 8;
+		u64 = (uint64_t *) &hdr[2];
+		*u64 = hton64(bytes);
+	}
+
+    bp = (uint8_t *) malloc(sizeof(uint8_t) * (hlen + bytes + 1));
+    if (NULL == bp) {
+        printf("memory alloc %ld bytes failed for write buffer!", hlen + bytes + 1);
+        return -1;
+    } 
+	memcpy(bp, (void *) &hdr[0], hlen);
+	memcpy(bp + hlen, data, bytes);
+
+    raw_ret = write(fd, bp, hlen + bytes);
+	if (raw_ret != (ssize_t) (hlen + bytes)) {
+        free(bp);
+		return raw_ret;
+	}
+    free(bp);
+	return bytes;
+}
+
 std::vector<std::string> http_raw_data_format(const char *data) {
     std::string raw_data_str(data);
     std::vector<std::string> lines;
@@ -98,6 +145,8 @@ void handshake_handle(int fd) {
 
     g_clientState[fd] = ESTABLISHED;
 }
+
+
 
 void data_handle(int fd) {
     char buf[RX_BUF_SIZE] = {0};
