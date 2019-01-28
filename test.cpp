@@ -36,5 +36,15 @@ int main(int argc, char const *argv[])
     std::string base64Str = base64.Encode((const unsigned char *)"dafddXCAD8329e&OOOII&^TYI**(IIIIOUY你好", strlen("dafddXCAD8329e&OOOII&^TYI**(IIIIOUY你好"));
     std::cout << base64Str << std::endl;
 
+    char *a = NULL;
+    char *b = NULL;
+    a = (char *)malloc(sizeof(char) * 64);
+    memcpy(a, "Hello World!", strlen("Hello World!"));
+
+    printf("a: 0x%x, %s\n", (int64_t)a, a);
+    b = (char *)realloc(a, 256);
+    free(a);
+    printf("b: 0x%x, %s\n", (int64_t)b, b);
+
     return 0;
 }

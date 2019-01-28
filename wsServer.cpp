@@ -107,7 +107,8 @@ std::string ws_accept_generation(const char *str) {
     return digest_base64;
 }
 
-void handshake_handle(int fd) {
+void handshake_handle(FDInfo *fdInfo) {
+    int fd = fdInfo->GetFD();
     g_clientState[fd] = HANDSHAKING;
     
     char buf[RX_BUF_SIZE] = {0};
@@ -148,7 +149,8 @@ void handshake_handle(int fd) {
 
 
 
-void data_handle(int fd) {
+void data_handle(FDInfo *fdInfo) {
+    int fd = fdInfo->GetFD();
     char buf[RX_BUF_SIZE] = {0};
     char mask_key[MASK_KEY_SIZE] = {0};
     ssize_t readlen = read_data(fd, buf, 2);
@@ -217,8 +219,10 @@ void data_handle(int fd) {
                     } 
                     memcpy((u_char *)mask_key, (u_char *)buf, MASK_KEY_SIZE);
                 }
-                u_char *payload = NULL;
-                payload = (u_char *)malloc(sizeof(u_char) * next_need_read_bytes + 1);
+                if ((fdInfo->GetReadBufSize() - fdInfo->GetReadBufLen()) < next_need_read_bytes) {
+                    fdInfo->AdjustReadBufSize(fdInfo->GetReadBufLen() + next_need_read_bytes + 1);
+                }
+                u_char *payload = (u_char *)fdInfo->GetReadBufStartAddr();
                 if (NULL == payload) {
                     printf("memory alloc %lud bytes for payload failed!\n", next_need_read_bytes + 1);
                     printf("%s\n", strerror(errno));
@@ -233,21 +237,19 @@ void data_handle(int fd) {
                     printf("read payload error.need to read: %lud, real read: %ld\n", next_need_read_bytes, readlen);
                     printf("closing fd: %d\n", fd);
                     close(fd);
+                    delete fdInfo;
                     g_clientState.erase(fd);
                     return ;
                 } else {
+                    fdInfo->SetReadBufLen(readlen);
                     size_t i = 0;
                     printf("payload: \n");
                     if (mask) {
                         for(i = 0; i < readlen; i++) {
                             payload[i] ^= mask_key[i % MASK_KEY_SIZE];
-                            printf("%c", payload[i]);
-                        }
-                    } else {
-                        for(i = 0; i < readlen; i++) {
-                            printf("%c", payload[i]);
                         }
                     }
+                    printf("Received: %s", (const char *)fdInfo->GetReadBufStartAddr());
                     printf("\n");
                 }
 
@@ -257,6 +259,7 @@ void data_handle(int fd) {
         default:
             printf("Closing fd: %d\n", fd);
             close(fd);
+            delete fdInfo;
             g_clientState.erase(fd);
             break;
     } 
@@ -264,6 +267,7 @@ void data_handle(int fd) {
 
 int request_handle(int listenfd, struct epoll_event *events, int nfds, int epfd) {
     struct epoll_event ev = {0};
+    FDInfo *fdInfo = NULL;
     for( int index = 0; index < nfds; index++) {
         if ((listenfd == events[index].data.fd) && (EPOLLIN & events[index].events)) {
             printf("Received connectting request.....\n");
@@ -277,22 +281,24 @@ int request_handle(int listenfd, struct epoll_event *events, int nfds, int epfd)
                 close(epfd);
                 return -1;
             }
-            ev.data.fd = clientfd;
+            fdInfo = new FDInfo(clientfd);
+            ev.data.ptr = (void *)fdInfo;
             ev.events = EPOLLIN | EPOLLET;
             epoll_ctl(epfd, EPOLL_CTL_ADD, clientfd, &ev);
             g_clientState.insert(std::pair<int, CLIENT_STATE>(clientfd, CONNECTTED));
 
             printf("Accepted connection from: %s:%d, fd: %d\n", inet_ntoa(clientaddr.sin_addr), ntohs(clientaddr.sin_port), clientfd);
         } else if(EPOLLIN & events[index].events) {
-            int fd = events[index].data.fd;
+            fdInfo = (FDInfo *)events[index].data.ptr;
+            int fd = fdInfo->GetFD();
             CLIENT_STATE client_state = g_clientState[fd];
             printf("client: %d state: %d\n", fd, client_state);
             switch(client_state) {
                 case CONNECTTED:
-                    handshake_handle(fd);
+                    handshake_handle(fdInfo);
                     break;
                 case ESTABLISHED:
-                    data_handle(fd);
+                    data_handle(fdInfo);
                     break;
                 default:
                     printf("state is invalid!\n");
