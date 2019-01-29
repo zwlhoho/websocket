@@ -13,6 +13,7 @@
 #include <openssl/sha.h>
 #include "base64.h"
 #include "fdinfo.h"
+#include "recorder-signal.h"
 
 #define __bswap_64(x) \
   x = (x>>56) | \

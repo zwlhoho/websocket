@@ -222,7 +222,7 @@ void data_handle(FDInfo *fdInfo) {
                 if ((fdInfo->GetReadBufSize() - fdInfo->GetReadBufLen()) < next_need_read_bytes) {
                     fdInfo->AdjustReadBufSize(fdInfo->GetReadBufLen() + next_need_read_bytes + 1);
                 }
-                u_char *payload = (u_char *)fdInfo->GetReadBufStartAddr();
+                u_char *payload = (u_char *)fdInfo->GetReadBuf();
                 if (NULL == payload) {
                     printf("memory alloc %lud bytes for payload failed!\n", next_need_read_bytes + 1);
                     printf("%s\n", strerror(errno));
@@ -249,10 +249,13 @@ void data_handle(FDInfo *fdInfo) {
                             payload[i] ^= mask_key[i % MASK_KEY_SIZE];
                         }
                     }
-                    printf("Received: %s", (const char *)fdInfo->GetReadBufStartAddr());
+                    printf("Received: %s", (const char *)fdInfo->GetReadBuf());
                     printf("\n");
                 }
 
+                if (fin) {
+                    recorder_signal_handle(fdInfo);
+                }
                 break;
             }
         case WSOC_CLOSE:        // control-frame
@@ -320,6 +323,10 @@ int main(int argc, const char *argv[]) {
     struct sockaddr_in serveraddr;
 
     signal(SIGINT, sys_signal_handle);
+    if (!initMediaServer()) {
+        printf("Error for init mediaserver!\n");
+        return -1;
+    }
 
     listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (-1 == listenfd) {

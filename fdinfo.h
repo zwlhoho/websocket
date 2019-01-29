@@ -27,8 +27,8 @@ public:
     size_t GetReadBufLen() {return this->m_readbufLen;};
     size_t GetWriteBufSize() {return this->m_writebufSize;};
     size_t GetWriteBufLen() {return this->m_writebufLen;};
-    void SetReadBufLen(ssize_t readBufLen) {this->m_readbufLen = readBufLen};
-    void *GetReadBufStartAddr() {return (void *)(&(((u_char *)m_readBuf)[m_readbufLen]));};
+    void SetReadBufLen(ssize_t readBufLen) {this->m_readbufLen = readBufLen;};
+    void *GetReadBuf() {return m_readBuf;};
 };
 
 #endif
