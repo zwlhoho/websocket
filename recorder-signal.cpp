@@ -6,11 +6,13 @@
 #include "mediaserver/RTPBundleTransport.h"
 #include "mediaserver/RTPTransport.h"
 #include "mediaserver/config.h"
+#include "mediaserver/rtp/RTPIncomingSourceGroup.h"
+#include "mediaserver/mp4recorder.h"
 
 using json = nlohmann::json;
 Properties g_properties;
-const static std::string g_localip("192.168.8.178");
-
+const static std::string g_localip("192.168.3.236");
+ MP4Recorder *recorder;
 typedef enum {
 	WSOC_CONTINUATION = 0x0,
 	WSOC_TEXT = 0x1,
@@ -56,9 +58,50 @@ std::string doHandleRequest(std::string msgtype, json requestParam, FDInfo *fdIn
         } catch (std::exception e) {
             std::cout << "Invite Handle Failed!\n" << e.what() << std::endl;
         }
+    } else if (0 == msgtype.compare("EventReleased")) {
+        if (NULL != recorder) {
+            recorder->Stop();
+            recorder->Close(false);
+        }
     }
     return result;
 }
+#include "mediaserver/rtp/RTPDepacketizer.h"
+class TestRTPListener : public RTPIncomingSourceGroup::Listener {
+private:
+    RTPDepacketizer* depacketizer;
+    MediaFrame::Listener *m_listener;
+public:
+
+    TestRTPListener(MediaFrame::Listener *listener) {
+        this->m_listener = listener;
+        depacketizer = NULL;
+    }
+
+    virtual void onRTP(RTPIncomingSourceGroup* group,const RTPPacket::shared& packet) { 
+		if (depacketizer && depacketizer->GetCodec()!=packet->GetCodec())
+		{
+			delete(depacketizer);
+			depacketizer = NULL;
+		}
+		if (!depacketizer)
+			depacketizer = RTPDepacketizer::Create(packet->GetMedia(),packet->GetCodec());
+		if (!depacketizer)
+			return;
+		 MediaFrame* frame = depacketizer->AddPacket(packet);
+		 
+		 if (frame) {
+             std::cout << "received [ " << frame->TypeToString(frame->GetType()) << " ] frame" << std::endl;
+			 this->m_listener->onMediaFrame(packet->GetSSRC(),*frame);
+			 depacketizer->ResetFrame();
+		 }
+
+    }
+    virtual void onEnded(RTPIncomingSourceGroup* group) {
+        std::cout << "ohaha. Catch RTP Packet!!!!!! End" << std::endl;
+	}
+};
+
 
 std::string inviteHandle(json offerSDP) {
     int localPort = -1;
@@ -91,6 +134,7 @@ std::string inviteHandle(json offerSDP) {
     g_dtls["hash"] = "sha-256";
 
     std::cout << "------------------------------------------- " << __LINE__ << std::endl;
+    std::cout << "offer sdp: " << offerSDP << std::endl;
     try {
         //Put ice properties
         g_properties.SetProperty("ice.localUsername"	, "abcd");
@@ -101,7 +145,7 @@ std::string inviteHandle(json offerSDP) {
         //Put remote dtls properties
         g_properties.SetProperty("dtls.setup"		, "passive");
         g_properties.SetProperty("dtls.hash"		, "sha-256");
-        g_properties.SetProperty("dtls.fingerprint"	, fingerprint);
+        g_properties.SetProperty("dtls.fingerprint"	, offerSDP["media"][0]["fingerprint"]["hash"].get<std::string>());
         
         //Put other options
         g_properties.SetProperty("disableSTUNKeepAlive"	, "false");
@@ -133,6 +177,7 @@ std::string inviteHandle(json offerSDP) {
     
     // set remote properties
     Properties remoteProperties;
+    json trackInfo;
     {
         for(int mediaTypeIndex = 0; mediaTypeIndex < offerSDP["media"].size(); ++mediaTypeIndex) {
             json &indexMedia = offerSDP["media"][mediaTypeIndex];
@@ -153,6 +198,43 @@ std::string inviteHandle(json offerSDP) {
                 remoteProperties.SetProperty(extPrefix + "." + std::to_string(extIndex) + ".uri", ext[extIndex]["uri"].get<std::string>());
             }
             remoteProperties.SetProperty(extPrefix + ".length", std::to_string(ext.size()));
+
+            json &ssrcs = indexMedia["ssrcs"];
+            json &ssrc_group = indexMedia["ssrcGroups"];
+            trackInfo[mediaType]["media"] = indexMedia["type"];
+            for (int ssrcIndex = 0; ssrcIndex < ssrcs.size(); ++ssrcIndex) {
+                uint32_t id = ssrcs[ssrcIndex]["id"].get<uint32_t>();
+                
+                std::string attribute = ssrcs[ssrcIndex]["attribute"].get<std::string>();
+                std::string value = ssrcs[ssrcIndex]["value"].get<std::string>();
+                if (0 == attribute.compare("label")) {
+                    trackInfo[mediaType]["id"] = ssrcs[ssrcIndex]["value"].get<std::string>();
+                    trackInfo[mediaType]["ssrcs"].push_back(id);
+                }
+            }
+
+            for (int groupIndex = 0; groupIndex < ssrc_group.size(); ++groupIndex) {
+                json &group = ssrc_group[groupIndex];
+                // std::cout << "ssrc_group:\n"  << group.dump() << std::endl;
+                std::string ssrcs_str = group["ssrcs"].get<std::string>();
+                uint32_t tmpSSRC = 0;
+                trackInfo[mediaType]["groups"]["semantics"] = group["semantics"];
+
+                for (int tmpIndex = 0; tmpIndex < ssrcs_str.length(); ++tmpIndex) {
+                    if (ssrcs_str[tmpIndex] >= '0' && ssrcs_str[tmpIndex] <= '9') {
+                        tmpSSRC *= 10;
+                        tmpSSRC += (ssrcs_str[tmpIndex] - '0');
+                        continue;
+                    } else if (0 != tmpSSRC) {
+                        trackInfo[mediaType]["groups"]["ssrcs"].push_back(tmpSSRC);
+                    }
+                    tmpSSRC = 0;
+                }
+
+                if (0 != tmpSSRC) {
+                    trackInfo[mediaType]["groups"]["ssrcs"].push_back(tmpSSRC);
+                }
+            }
         }
     }
 
@@ -172,8 +254,8 @@ std::string inviteHandle(json offerSDP) {
         audio_media["candidates"].push_back(candidate);
         audio_media["direction"] = "recvonly";
         audio_media["setup"] = "active";
-        audio_media["mid"] = "audio";
-        audio_media["payloads"] = "0 8 111";
+        audio_media["mid"] = "0";
+        audio_media["payloads"] = "0 8";
         audio_media["port"] = candidate["port"];
         audio_media["protocol"] = "UDP/TLS/RTP/SAVPF";
         audio_media["type"] = "audio";
@@ -201,7 +283,7 @@ std::string inviteHandle(json offerSDP) {
         video_media["candidates"].push_back(candidate);
         video_media["direction"] = "recvonly";
         video_media["setup"] = "active";
-        video_media["mid"] = "video";
+        video_media["mid"] = "1";
         video_media["payloads"] = "96";
         video_media["port"] = candidate["port"];
         video_media["protocol"] = "UDP/TLS/RTP/SAVPF";
@@ -235,6 +317,53 @@ std::string inviteHandle(json offerSDP) {
 
         sdp_str = sdptransform::write(sdp);
         std::cout << "sdp_str: " << sdp_str << std::endl;
+    }    
+
+    {
+        // create track
+        json &audioTrack = trackInfo["audio"];
+        json &videoTrack = trackInfo["video"];
+        //MP4Recorder
+        recorder = new MP4Recorder();
+        if (recorder->Create("/tmp/myrecorder.mp4")) {
+            std::cout << "recorder Create succeed!" << std::endl;
+        } else {
+            std::cout << "recorder Create failed!" << std::endl;
+        }
+
+        recorder->Record(false);
+
+        TestRTPListener *testRTPListener = new TestRTPListener(recorder);
+
+        std::cout << "audio track: " << audioTrack << std::endl;
+        std::cout << "video track: " << videoTrack << std::endl;
+
+        RTPIncomingSourceGroup *audioSource = new RTPIncomingSourceGroup(MediaFrame::Audio);
+        audioSource->media.ssrc = audioTrack["ssrcs"].at(0).get<uint32_t>();
+        audioSource->rtx.ssrc = 0;
+        audioSource->fec.ssrc = 0;
+        if (transport->AddIncomingSourceGroup(audioSource)) {
+            std::cout << "------Add Audio Incoming Source Group succeed!" << std::endl;
+        } else {
+            std::cout << "------Add Audio Incoming Source Group failed!" << std::endl;
+        }
+
+        RTPIncomingSourceGroup *videoSource = new RTPIncomingSourceGroup(MediaFrame::Video);
+        videoSource->media.ssrc = videoTrack["ssrcs"].at(0).get<uint32_t>();
+        videoSource->rtx.ssrc = videoTrack["groups"]["ssrcs"].at(1).get<uint32_t>();
+        videoSource->fec.ssrc = 0;
+        if (transport->AddIncomingSourceGroup(videoSource)) {
+            std::cout << "------Add Video Incoming Source Group succeed!" << std::endl;
+        } else {
+            std::cout << "------Add Video Incoming Source Group failed!" << std::endl;
+        }
+
+        audioSource->AddListener(testRTPListener);
+        videoSource->AddListener(testRTPListener);
+    }
+
+    {
+        // transport
     }
 
     return sdp_str;
