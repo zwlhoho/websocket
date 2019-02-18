@@ -1,5 +1,6 @@
 #include "recorder-signal.h"
 #include <iostream>
+#include <map>
 #include "sdptransform/sdptransform.hpp"
 #include "mediaserver/RTPBundleTransport.h"
 
@@ -23,6 +24,15 @@ typedef enum {
 } WS_OPCODE;
 ssize_t ws_write_frame(int fd, WS_OPCODE oc, void *data, size_t bytes);
 
+typedef struct _RTPBundleInfo {
+    RTPBundleTransport *bundle;
+    DTLSICETransport *transport;
+    RTPIncomingSourceGroup *audioIncomingSource;
+    RTPIncomingSourceGroup *videoIncomingSource;
+} RTPBundleInfo;
+
+std::map<std::string, RTPBundleInfo> g_fromuserRTPBundleInfo;
+
 void recorder_signal_handle(FDInfo *fdInfo) {
     const char *signal_data = (char *)fdInfo->GetReadBuf();
     try {
@@ -36,6 +46,7 @@ void recorder_signal_handle(FDInfo *fdInfo) {
 
 std::string doHandleRequest(std::string msgtype, json requestParam, FDInfo *fdInfo) {
     std::string result("");
+    std::string fromuser = requestParam["fromuser"].get<std::string>();
     std::cout << "msgtype: " << msgtype << " request params: " << requestParam << std::endl;
     if (0 == msgtype.compare("login")) {
         std::cout << "login " << std::endl;
@@ -46,7 +57,7 @@ std::string doHandleRequest(std::string msgtype, json requestParam, FDInfo *fdIn
 
         json offerSDP = sdptransform::parse(sdpStr);
         try {
-            std::string sdp_str = inviteHandle(offerSDP);
+            std::string sdp_str = inviteHandle(offerSDP, fromuser);
             json response;
             response["msgtype"] = "RequestAnswerCall";
             response["content"] = sdp_str;
@@ -59,6 +70,45 @@ std::string doHandleRequest(std::string msgtype, json requestParam, FDInfo *fdIn
             std::cout << "Invite Handle Failed!\n" << e.what() << std::endl;
         }
     } else if (0 == msgtype.compare("EventReleased")) {
+        std::map<std::string, RTPBundleInfo>::iterator it;
+        it = g_fromuserRTPBundleInfo.find(fromuser);
+        if (it != g_fromuserRTPBundleInfo.end()) {
+            RTPBundleInfo bundleInfo = it->second;
+            if (NULL != bundleInfo.bundle) {
+                bundleInfo.bundle->End();
+                delete bundleInfo.bundle;
+                bundleInfo.bundle = NULL;
+            }
+            if (NULL != bundleInfo.transport) {
+                if (NULL != bundleInfo.audioIncomingSource) {
+                    bundleInfo.transport->RemoveIncomingSourceGroup(bundleInfo.audioIncomingSource);
+                    delete bundleInfo.audioIncomingSource;
+                    bundleInfo.audioIncomingSource = NULL;
+                }
+                if (NULL != bundleInfo.videoIncomingSource) {
+                    bundleInfo.transport->RemoveIncomingSourceGroup(bundleInfo.videoIncomingSource);
+                    delete bundleInfo.videoIncomingSource;
+                    bundleInfo.videoIncomingSource = NULL;
+                }
+                bundleInfo.transport->Stop();
+                delete bundleInfo.transport;
+                bundleInfo.transport = NULL;
+            }
+
+            if (NULL != bundleInfo.videoIncomingSource) {
+                bundleInfo.videoIncomingSource->Stop();
+                delete bundleInfo.videoIncomingSource;
+                bundleInfo.videoIncomingSource = NULL;
+            }
+
+            if (NULL != bundleInfo.audioIncomingSource) {
+                bundleInfo.audioIncomingSource->Stop();
+                delete bundleInfo.audioIncomingSource;
+                bundleInfo.audioIncomingSource = NULL;
+            }
+
+            g_fromuserRTPBundleInfo.erase(it);
+        }
         if (NULL != recorder) {
             recorder->Stop();
             recorder->Close(false);
@@ -103,7 +153,7 @@ public:
 };
 
 
-std::string inviteHandle(json offerSDP) {
+std::string inviteHandle(json offerSDP, std::string fromuser) {
     int localPort = -1;
     RTPBundleTransport *bundle = new RTPBundleTransport();
     DTLSICETransport *transport = NULL;
@@ -254,7 +304,7 @@ std::string inviteHandle(json offerSDP) {
         audio_media["candidates"].push_back(candidate);
         audio_media["direction"] = "recvonly";
         audio_media["setup"] = "active";
-        audio_media["mid"] = "0";
+        audio_media["mid"] = "audio";
         audio_media["payloads"] = "0 8";
         audio_media["port"] = candidate["port"];
         audio_media["protocol"] = "UDP/TLS/RTP/SAVPF";
@@ -283,7 +333,7 @@ std::string inviteHandle(json offerSDP) {
         video_media["candidates"].push_back(candidate);
         video_media["direction"] = "recvonly";
         video_media["setup"] = "active";
-        video_media["mid"] = "1";
+        video_media["mid"] = "video";
         video_media["payloads"] = "96";
         video_media["port"] = candidate["port"];
         video_media["protocol"] = "UDP/TLS/RTP/SAVPF";
@@ -360,10 +410,17 @@ std::string inviteHandle(json offerSDP) {
 
         audioSource->AddListener(testRTPListener);
         videoSource->AddListener(testRTPListener);
+
+        RTPBundleInfo rtpBundleInfo;
+        rtpBundleInfo.bundle = bundle;
+        rtpBundleInfo.transport = transport;
+        rtpBundleInfo.audioIncomingSource = audioSource;
+        rtpBundleInfo.videoIncomingSource = videoSource;
+
+        g_fromuserRTPBundleInfo.insert(std::pair<std::string, RTPBundleInfo>(fromuser, rtpBundleInfo));
     }
 
     {
-        // transport
     }
 
     return sdp_str;

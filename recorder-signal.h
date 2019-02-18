@@ -9,6 +9,6 @@ using json = nlohmann::json;
 bool initMediaServer();
 void recorder_signal_handle(FDInfo *fdInfo);
 std::string doHandleRequest(std::string msgtype, json requestParam, FDInfo *fdInfo);
-std::string inviteHandle(json offerSDP);
+std::string inviteHandle(json offerSDP, std::string fromuser);
 
 #endif
