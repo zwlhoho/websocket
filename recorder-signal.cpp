@@ -152,6 +152,144 @@ public:
 	}
 };
 
+#include "mediaserver/remoterateestimator.h"
+class SenderSideEstimatorListener : 
+	public RemoteRateEstimator::Listener
+{
+public:
+	SenderSideEstimatorListener() {
+		
+	}
+	
+	virtual void onTargetBitrateRequested(DWORD bitrate) override {
+		//Check we have not send an update too recently (1s)
+		if (getTimeDiff(last)/1000 < period)
+			//Do nothing
+			return;
+		
+		//Update it
+		last = getTime();
+		std::cout << "bit rate: " << bitrate << "last: " << last << std::endl;
+	}
+	
+	void SetMinPeriod(DWORD period) { this->period = period; }
+	
+private:
+	DWORD period	= 1000;
+	QWORD last	= 0;
+};
+
+
+class StreamTrackDepacketizer :
+	public RTPIncomingSourceGroup::Listener
+{
+public:
+	StreamTrackDepacketizer(RTPIncomingSourceGroup* incomingSource)
+	{
+		//Store
+		this->incomingSource = incomingSource;
+		//Add us as RTP listeners
+		this->incomingSource->AddListener(this);
+		//No depkacketixer yet
+		depacketizer = NULL;
+	}
+
+	virtual ~StreamTrackDepacketizer()
+	{
+		//JIC
+		Stop();
+		//Check 
+		if (depacketizer)
+			//Delete depacketier
+			delete(depacketizer);
+	}
+
+	virtual void onRTP(RTPIncomingSourceGroup* group,const RTPPacket::shared& packet)
+	{
+		//Do not do extra work if there are no listeners
+		if (listeners.empty()) 
+			return;
+		
+		//If depacketizer is not the same codec 
+		if (depacketizer && depacketizer->GetCodec()!=packet->GetCodec())
+		{
+			//Delete it
+			delete(depacketizer);
+			//Create it next
+			depacketizer = NULL;
+		}
+		//If we don't have a depacketized
+		if (!depacketizer)
+			//Create one
+			depacketizer = RTPDepacketizer::Create(packet->GetMedia(),packet->GetCodec());
+		//Ensure we have it
+		if (!depacketizer)
+			//Do nothing
+			return;
+		//Pass the pakcet to the depacketizer
+		 MediaFrame* frame = depacketizer->AddPacket(packet);
+		 
+		 //If we have a new frame
+		 if (frame)
+		 {
+             if (MediaFrame::Video == frame->GetType()) {
+                 VideoFrame *videoFrame = (VideoFrame *)frame;
+                 std::cout << "received [ Video ] frame, SSRC: " << frame->GetSSRC()  << " Payload Type: " << packet->GetPayloadType() << " Frame Codec: " << videoFrame->GetCodec() \
+                            << " Width: " <<  videoFrame->GetWidth() << " Height: " << videoFrame->GetHeight() << " IsIntra: " << videoFrame->IsIntra() << std::endl;
+             } else if (MediaFrame::Audio == frame->GetType()) {
+                 AudioFrame *audioFrame = (AudioFrame *)frame;
+                 std::cout << "received [ Audio ] frame, SSRC: " << frame->GetSSRC()  << " Payload Type: " << packet->GetPayloadType() << " Frame Codec: " << audioFrame->GetCodec() \
+                            << " Rate: " <<  audioFrame->GetRate() << std::endl;
+             }
+			 //Call all listeners
+			 for (Listeners::const_iterator it = listeners.begin();it!=listeners.end();++it)
+				 //Call listener
+				 (*it)->onMediaFrame(packet->GetSSRC(),*frame);
+			 //Next
+			 depacketizer->ResetFrame();
+		 }
+		
+			
+	}
+	
+	virtual void onEnded(RTPIncomingSourceGroup* group) 
+	{
+		if (incomingSource==group)
+			incomingSource = nullptr;
+	}
+	
+	void AddMediaListener(MediaFrame::Listener *listener)
+	{
+		//Add to set
+		listeners.insert(listener);
+	}
+	
+	void RemoveMediaListener(MediaFrame::Listener *listener)
+	{
+		//Remove from set
+		listeners.erase(listener);
+	}
+	
+	void Stop()
+	{
+		//If already stopped
+		if (!incomingSource)
+			//Done
+			return;
+		
+		//Stop listeneing
+		incomingSource->RemoveListener(this);
+		//Clean it
+		incomingSource = NULL;
+	}
+	
+private:
+	typedef std::set<MediaFrame::Listener*> Listeners;
+private:
+	Listeners listeners;
+	RTPDepacketizer* depacketizer;
+	RTPIncomingSourceGroup* incomingSource;
+};
 
 std::string inviteHandle(json offerSDP, std::string fromuser) {
     int localPort = -1;
@@ -212,7 +350,7 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
     std::cout << "------------------------------------------- " << __LINE__ << std::endl;
 
     transport =  bundle->AddICETransport(username, g_properties);
-    
+    transport->SetSenderSideEstimatorListener(new SenderSideEstimatorListener());
     std::cout << "------------------------------------------- " << __LINE__ << std::endl;
 
     for(int index = 0; index < offerSDP["media"].size(); index++) {
@@ -293,6 +431,7 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
     std::string sdp_str(""); 
     {
         json sdp;
+        json group_bundle;
         json audio_media;
         json pcma_payload;
         json pcmu_payload;
@@ -300,6 +439,9 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
 
         json video_media;
         json vp8_payload;
+        json h264_payload;
+        json video_ext3;
+        json video_ext5;
         
         audio_media["candidates"].push_back(candidate);
         audio_media["direction"] = "recvonly";
@@ -328,7 +470,13 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
 
         audio_media["rtp"].push_back(pcmu_payload);
         audio_media["rtp"].push_back(pcma_payload);
-        
+
+        // a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
+        // a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
+        video_ext3["uri"] = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+        video_ext3["value"] = 3;
+        video_ext5["uri"] = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+        video_ext5["value"] = 5;
 
         video_media["candidates"].push_back(candidate);
         video_media["direction"] = "recvonly";
@@ -344,13 +492,24 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
         video_media["icePwd"] = g_ice["pwd"];
         video_media["fingerprint"]["type"] = "sha-256";
         video_media["fingerprint"]["hash"] = fingerprint;
+        video_media["ext"].push_back(video_ext3);
+        video_media["ext"].push_back(video_ext5);
 
         vp8_payload["codec"] = "VP8";
         vp8_payload["payload"] = 96;
         vp8_payload["rate"] = 90000;
+
+        h264_payload["codec"] = "H264";
+        h264_payload["payload"] = 100;
+        h264_payload["rate"] = 90000;
+
         video_media["rtp"].push_back(vp8_payload);
 
 
+        // "groups":[{"mids":"audio video","type":"BUNDLE"}]
+        group_bundle["mids"] = "audio video";
+        group_bundle["type"] = "BUNDLE";
+        sdp["groups"].push_back(group_bundle);
         sdp["media"].push_back(audio_media);
         sdp["media"].push_back(video_media);
 
@@ -381,7 +540,7 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
             std::cout << "recorder Create failed!" << std::endl;
         }
 
-        recorder->Record(false);
+        recorder->Record(true);
 
         TestRTPListener *testRTPListener = new TestRTPListener(recorder);
 
@@ -408,8 +567,14 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
             std::cout << "------Add Video Incoming Source Group failed!" << std::endl;
         }
 
-        audioSource->AddListener(testRTPListener);
-        videoSource->AddListener(testRTPListener);
+        // audioSource->AddListener(testRTPListener);
+        // videoSource->AddListener(testRTPListener);
+
+        StreamTrackDepacketizer *audioTrackDepacket = new StreamTrackDepacketizer(audioSource);
+        audioTrackDepacket->AddMediaListener(recorder);
+
+        StreamTrackDepacketizer *videoTrackDepacket = new StreamTrackDepacketizer(videoSource);
+        videoTrackDepacket->AddMediaListener(recorder);
 
         RTPBundleInfo rtpBundleInfo;
         rtpBundleInfo.bundle = bundle;
