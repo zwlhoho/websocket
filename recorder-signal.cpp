@@ -3,12 +3,11 @@
 #include <map>
 #include "sdptransform/sdptransform.hpp"
 #include "mediaserver/RTPBundleTransport.h"
-
-#include "mediaserver/RTPBundleTransport.h"
 #include "mediaserver/RTPTransport.h"
-#include "mediaserver/config.h"
+#include "mediaserver/rtp/RTPStreamTransponder.h"
 #include "mediaserver/rtp/RTPIncomingSourceGroup.h"
 #include "mediaserver/mp4recorder.h"
+#include "uuid/uuid.h"
 
 using json = nlohmann::json;
 Properties g_properties;
@@ -426,10 +425,119 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
         }
     }
 
-    transport->SetRemoteProperties(remoteProperties);
+    transport->SetRemoteProperties(remoteProperties); 
+    
+    {
+        // [audio.codecs.0.codec:opus]
+        // [audio.codecs.0.pt:111]
+        // [audio.codecs.length:1]
+        // [audio.ext.length:0]
+        // [video.codecs.0.codec:vp8]
+
+        // [video.codecs.0.pt:96]
+        // [video.codecs.length:1]
+        // [video.ext.length:0]
+        Properties localProperties;
+        localProperties.SetProperty("audio.codecs.0.codec", "pcmu");
+        localProperties.SetProperty("audio.codecs.0.pt", 0);
+        localProperties.SetProperty("audio.codecs.1.codec", "pcma");
+        localProperties.SetProperty("audio.codecs.1.pt", 8);
+        localProperties.SetProperty("audio.codecs.length", 2);
+        localProperties.SetProperty("audio.ext.length", 0);
+
+        localProperties.SetProperty("video.codecs.0.codec", "vp8");
+        localProperties.SetProperty("video.codecs.0.pt", 96);
+        localProperties.SetProperty("video.codecs.length", 1);
+        localProperties.SetProperty("video.ext.length", 0);
+        
+        transport->SetLocalProperties(localProperties);
+    }
 
     std::string sdp_str(""); 
     {
+        
+
+    // }    
+
+    // {
+        // create track
+        json &audioTrack = trackInfo["audio"];
+        json &videoTrack = trackInfo["video"];
+        //MP4Recorder
+        recorder = new MP4Recorder();
+        if (recorder->Create("/tmp/myrecorder.mp4")) {
+            std::cout << "recorder Create succeed!" << std::endl;
+        } else {
+            std::cout << "recorder Create failed!" << std::endl;
+        }
+
+        recorder->Record(true);
+
+        TestRTPListener *testRTPListener = new TestRTPListener(recorder);
+
+        std::cout << "audio track: " << audioTrack << std::endl;
+        std::cout << "video track: " << videoTrack << std::endl;
+
+        RTPIncomingSourceGroup *audioSource = new RTPIncomingSourceGroup(MediaFrame::Audio);
+        audioSource->media.ssrc = audioTrack["ssrcs"].at(0).get<uint32_t>();
+        audioSource->rtx.ssrc = 0;
+        audioSource->fec.ssrc = 0;
+        if (transport->AddIncomingSourceGroup(audioSource)) {
+            std::cout << "------Add Audio Incoming Source Group succeed!" << std::endl;
+        } else {
+            std::cout << "------Add Audio Incoming Source Group failed!" << std::endl;
+        }
+
+        RTPIncomingSourceGroup *videoSource = new RTPIncomingSourceGroup(MediaFrame::Video);
+        videoSource->media.ssrc = videoTrack["ssrcs"].at(0).get<uint32_t>();
+        videoSource->rtx.ssrc = videoTrack["groups"]["ssrcs"].at(1).get<uint32_t>();
+        videoSource->fec.ssrc = 0;
+        if (transport->AddIncomingSourceGroup(videoSource)) {
+            std::cout << "------Add Video Incoming Source Group succeed!" << std::endl;
+        } else {
+            std::cout << "------Add Video Incoming Source Group failed!" << std::endl;
+        }
+
+        // audioSource->AddListener(testRTPListener);
+        // videoSource->AddListener(testRTPListener);
+
+        StreamTrackDepacketizer *audioTrackDepacket = new StreamTrackDepacketizer(audioSource);
+        audioTrackDepacket->AddMediaListener(recorder);
+
+        StreamTrackDepacketizer *videoTrackDepacket = new StreamTrackDepacketizer(videoSource);
+        videoTrackDepacket->AddMediaListener(recorder);
+
+        RTPOutgoingSourceGroup *audioOutgoingSource = new RTPOutgoingSourceGroup(MediaFrame::Audio);
+        audioOutgoingSource->rtx.ssrc = 0;
+        audioOutgoingSource->fec.ssrc = 0;
+        if (transport->AddOutgoingSourceGroup(audioOutgoingSource)) {
+            std::cout << "------Add Audio Outgoing Source Group succeed!" << std::endl;
+        } else {
+            std::cout << "------Add Audio Outgoing Source Group failed!" << std::endl;
+        }
+
+        RTPStreamTransponder *audioTransponder = new RTPStreamTransponder(audioOutgoingSource, transport);
+        audioTransponder->SetIncoming(audioSource, transport);
+
+        RTPOutgoingSourceGroup *videoOutgoingSource = new RTPOutgoingSourceGroup(MediaFrame::Video);
+        if (transport->AddOutgoingSourceGroup(videoOutgoingSource)) {
+            std::cout << "------Add Video Outgoing Source Group succeed!" << std::endl;
+        } else {
+            std::cout << "------Add Video Outgoing Source Group failed!" << std::endl;
+        }
+
+        RTPStreamTransponder *videoTransponder = new RTPStreamTransponder(videoOutgoingSource, transport);
+        videoTransponder->SetIncoming(videoSource, transport);
+
+        RTPBundleInfo rtpBundleInfo;
+        rtpBundleInfo.bundle = bundle;
+        rtpBundleInfo.transport = transport;
+        rtpBundleInfo.audioIncomingSource = audioSource;
+        rtpBundleInfo.videoIncomingSource = videoSource;
+
+        g_fromuserRTPBundleInfo.insert(std::pair<std::string, RTPBundleInfo>(fromuser, rtpBundleInfo));
+
+
         json sdp;
         json group_bundle;
         json audio_media;
@@ -506,6 +614,63 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
         video_media["rtp"].push_back(vp8_payload);
 
 
+        json audioSSRC;
+        std::string mediastreamid = uuid_gen_test();
+        audioSSRC["attribute"] = "cname";
+        audioSSRC["value"] = mediastreamid;
+        audioSSRC["id"] = audioOutgoingSource->media.ssrc;
+        audio_media["ssrcs"].push_back(audioSSRC);
+
+        audioSSRC["attribute"] = "msid";
+        audioSSRC["value"] = mediastreamid + " " + "audio0";
+        audioSSRC["id"] = audioOutgoingSource->media.ssrc;   
+        audio_media["ssrcs"].push_back(audioSSRC);
+
+        json ssrc;
+        ssrc["attribute"] = "cname";
+        ssrc["value"] = mediastreamid;
+        ssrc["id"] = videoOutgoingSource->media.ssrc;
+        video_media["ssrcs"].push_back(ssrc);
+
+        ssrc["attribute"] = "msid";
+        ssrc["value"] = mediastreamid + " " + "video0";
+        ssrc["id"] = videoOutgoingSource->media.ssrc;   
+        video_media["ssrcs"].push_back(ssrc);
+
+        ssrc["attribute"] = "cname";
+        ssrc["value"] = mediastreamid;
+        ssrc["id"] = videoOutgoingSource->rtx.ssrc;
+        video_media["ssrcs"].push_back(ssrc);
+
+        ssrc["attribute"] = "msid";
+        ssrc["value"] = mediastreamid + " " + "video0";
+        ssrc["id"] = videoOutgoingSource->rtx.ssrc;   
+        video_media["ssrcs"].push_back(ssrc);
+
+        ssrc["attribute"] = "cname";
+        ssrc["value"] = mediastreamid;
+        ssrc["id"] = videoOutgoingSource->fec.ssrc;
+        video_media["ssrcs"].push_back(ssrc);
+
+        ssrc["attribute"] = "msid";
+        ssrc["value"] = mediastreamid + " " + "video0";
+        ssrc["id"] = videoOutgoingSource->fec.ssrc;   
+        video_media["ssrcs"].push_back(ssrc);
+
+        json ssrc_group;
+        std::stringstream ss;
+
+        ss << videoOutgoingSource->media.ssrc << " " << videoOutgoingSource->rtx.ssrc;
+        ssrc_group["semantics"] = "FID";
+        ssrc_group["ssrcs"] = ss.str();
+        video_media["ssrcGroups"].push_back(ssrc_group);
+
+        ss.str("");
+        ss << videoOutgoingSource->media.ssrc << " " << videoOutgoingSource->fec.ssrc;
+        ssrc_group["semantics"] = "FEC-FR";
+        ssrc_group["ssrcs"] = ss.str();
+        video_media["ssrcGroups"].push_back(ssrc_group);
+
         // "groups":[{"mids":"audio video","type":"BUNDLE"}]
         group_bundle["mids"] = "audio video";
         group_bundle["type"] = "BUNDLE";
@@ -523,66 +688,8 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
         sdp["origin"]["username"] = "-";
         sdp["timing"]["start"] = 0;
         sdp["timing"]["stop"] = 0;
-
         sdp_str = sdptransform::write(sdp);
         std::cout << "sdp_str: " << sdp_str << std::endl;
-    }    
-
-    {
-        // create track
-        json &audioTrack = trackInfo["audio"];
-        json &videoTrack = trackInfo["video"];
-        //MP4Recorder
-        recorder = new MP4Recorder();
-        if (recorder->Create("/tmp/myrecorder.mp4")) {
-            std::cout << "recorder Create succeed!" << std::endl;
-        } else {
-            std::cout << "recorder Create failed!" << std::endl;
-        }
-
-        recorder->Record(true);
-
-        TestRTPListener *testRTPListener = new TestRTPListener(recorder);
-
-        std::cout << "audio track: " << audioTrack << std::endl;
-        std::cout << "video track: " << videoTrack << std::endl;
-
-        RTPIncomingSourceGroup *audioSource = new RTPIncomingSourceGroup(MediaFrame::Audio);
-        audioSource->media.ssrc = audioTrack["ssrcs"].at(0).get<uint32_t>();
-        audioSource->rtx.ssrc = 0;
-        audioSource->fec.ssrc = 0;
-        if (transport->AddIncomingSourceGroup(audioSource)) {
-            std::cout << "------Add Audio Incoming Source Group succeed!" << std::endl;
-        } else {
-            std::cout << "------Add Audio Incoming Source Group failed!" << std::endl;
-        }
-
-        RTPIncomingSourceGroup *videoSource = new RTPIncomingSourceGroup(MediaFrame::Video);
-        videoSource->media.ssrc = videoTrack["ssrcs"].at(0).get<uint32_t>();
-        videoSource->rtx.ssrc = videoTrack["groups"]["ssrcs"].at(1).get<uint32_t>();
-        videoSource->fec.ssrc = 0;
-        if (transport->AddIncomingSourceGroup(videoSource)) {
-            std::cout << "------Add Video Incoming Source Group succeed!" << std::endl;
-        } else {
-            std::cout << "------Add Video Incoming Source Group failed!" << std::endl;
-        }
-
-        // audioSource->AddListener(testRTPListener);
-        // videoSource->AddListener(testRTPListener);
-
-        StreamTrackDepacketizer *audioTrackDepacket = new StreamTrackDepacketizer(audioSource);
-        audioTrackDepacket->AddMediaListener(recorder);
-
-        StreamTrackDepacketizer *videoTrackDepacket = new StreamTrackDepacketizer(videoSource);
-        videoTrackDepacket->AddMediaListener(recorder);
-
-        RTPBundleInfo rtpBundleInfo;
-        rtpBundleInfo.bundle = bundle;
-        rtpBundleInfo.transport = transport;
-        rtpBundleInfo.audioIncomingSource = audioSource;
-        rtpBundleInfo.videoIncomingSource = videoSource;
-
-        g_fromuserRTPBundleInfo.insert(std::pair<std::string, RTPBundleInfo>(fromuser, rtpBundleInfo));
     }
 
     {
@@ -616,4 +723,12 @@ bool initMediaServer() {
     Logger::EnableDebug(true);
     Logger::EnableLog(true);
     return true;
+}
+
+std::string uuid_gen_test() {
+    uuid_t uuid;
+    char buf[64] = {0};
+    uuid_generate(uuid);
+    uuid_unparse(uuid, buf);
+    return std::string(buf);
 }
