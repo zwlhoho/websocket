@@ -10,8 +10,7 @@
 #include "uuid/uuid.h"
 
 using json = nlohmann::json;
-Properties g_properties;
-const static std::string g_localip("192.168.3.236");
+const static std::string g_localip("192.168.36.21");
  MP4Recorder *recorder;
 typedef enum {
 	WSOC_CONTINUATION = 0x0,
@@ -168,7 +167,7 @@ public:
 		
 		//Update it
 		last = getTime();
-		std::cout << "bit rate: " << bitrate << "last: " << last << std::endl;
+		// std::cout << "bit rate: " << bitrate << "last: " << last << std::endl;
 	}
 	
 	void SetMinPeriod(DWORD period) { this->period = period; }
@@ -296,6 +295,7 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
     DTLSICETransport *transport = NULL;
     std::string fingerprint = DTLSConnection::GetCertificateFingerPrint(DTLSConnection::Hash::SHA256);
     json candidate;
+    Properties properties;
     bundle->Init();
     localPort = bundle->GetLocalPort();
     candidate["foundation"] = std::string("1");
@@ -306,7 +306,7 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
     candidate["port"] = localPort;
     candidate["type"] = std::string("host");
     
-    std::cout << "candaidate: " << candidate << std::endl;
+    // std::cout << "candaidate: " << candidate << std::endl;
 
     std::cout << "------------------------------------------- " << __LINE__ << std::endl;
     json g_ice;
@@ -324,19 +324,19 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
     std::cout << "offer sdp: " << offerSDP << std::endl;
     try {
         //Put ice properties
-        g_properties.SetProperty("ice.localUsername"	, "abcd");
-        g_properties.SetProperty("ice.localPassword"	, "1234567890abcdefghijklmnopqrstuvwxy");
-        g_properties.SetProperty("ice.remoteUsername"	, offerSDP["media"][0]["iceUfrag"].get<std::string>());
-        g_properties.SetProperty("ice.remotePassword"	, offerSDP["media"][0]["icePwd"].get<std::string>());
+        properties.SetProperty("ice.localUsername"	, "abcd");
+        properties.SetProperty("ice.localPassword"	, "1234567890abcdefghijklmnopqrstuvwxy");
+        properties.SetProperty("ice.remoteUsername"	, offerSDP["media"][0]["iceUfrag"].get<std::string>());
+        properties.SetProperty("ice.remotePassword"	, offerSDP["media"][0]["icePwd"].get<std::string>());
 
         //Put remote dtls properties
-        g_properties.SetProperty("dtls.setup"		, "passive");
-        g_properties.SetProperty("dtls.hash"		, "sha-256");
-        g_properties.SetProperty("dtls.fingerprint"	, offerSDP["media"][0]["fingerprint"]["hash"].get<std::string>());
+        properties.SetProperty("dtls.setup"		, "passive");
+        properties.SetProperty("dtls.hash"		, offerSDP["media"][0]["fingerprint"]["type"].get<std::string>());
+        properties.SetProperty("dtls.fingerprint"	, offerSDP["media"][0]["fingerprint"]["hash"].get<std::string>());
         
         //Put other options
-        g_properties.SetProperty("disableSTUNKeepAlive"	, "false");
-        g_properties.SetProperty("srtpProtectionProfiles"	, "");
+        properties.SetProperty("disableSTUNKeepAlive"	, "false");
+        properties.SetProperty("srtpProtectionProfiles"	, "");
     } catch(std::exception ee) {
         std::cout << ee.what() << std::endl;
     }
@@ -348,13 +348,13 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
 
     std::cout << "------------------------------------------- " << __LINE__ << std::endl;
 
-    transport =  bundle->AddICETransport(username, g_properties);
-    transport->SetSenderSideEstimatorListener(new SenderSideEstimatorListener());
+    transport =  bundle->AddICETransport(username, properties);
+    // transport->SetSenderSideEstimatorListener(new SenderSideEstimatorListener());
     std::cout << "------------------------------------------- " << __LINE__ << std::endl;
 
     for(int index = 0; index < offerSDP["media"].size(); index++) {
-        std::cout << "----------------------------------------------------------------" << std::endl;
-        std::cout << "media[ " << index << " ]\n" << offerSDP["media"][index] << std::endl;
+        // std::cout << "----------------------------------------------------------------" << std::endl;
+        // std::cout << "media[ " << index << " ]\n" << offerSDP["media"][index] << std::endl;
         
         for(int  jindex = 0; jindex < offerSDP["media"][index]["candidates"].size(); jindex++) {
             json &tmpCandidate = offerSDP["media"][index]["candidates"][jindex];
@@ -473,10 +473,10 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
 
         recorder->Record(true);
 
-        TestRTPListener *testRTPListener = new TestRTPListener(recorder);
+        // TestRTPListener *testRTPListener = new TestRTPListener(recorder);
 
-        std::cout << "audio track: " << audioTrack << std::endl;
-        std::cout << "video track: " << videoTrack << std::endl;
+        // std::cout << "audio track: " << audioTrack << std::endl;
+        // std::cout << "video track: " << videoTrack << std::endl;
 
         RTPIncomingSourceGroup *audioSource = new RTPIncomingSourceGroup(MediaFrame::Audio);
         audioSource->media.ssrc = audioTrack["ssrcs"].at(0).get<uint32_t>();
@@ -552,9 +552,9 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
         json video_ext5;
         
         audio_media["candidates"].push_back(candidate);
-        audio_media["direction"] = "recvonly";
+        audio_media["direction"] = "sendrecv";
         audio_media["setup"] = "active";
-        audio_media["mid"] = "audio";
+        audio_media["mid"] = "0";
         audio_media["payloads"] = "0 8";
         audio_media["port"] = candidate["port"];
         audio_media["protocol"] = "UDP/TLS/RTP/SAVPF";
@@ -587,9 +587,9 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
         video_ext5["value"] = 5;
 
         video_media["candidates"].push_back(candidate);
-        video_media["direction"] = "recvonly";
+        video_media["direction"] = "sendrecv";
         video_media["setup"] = "active";
-        video_media["mid"] = "video";
+        video_media["mid"] = "1";
         video_media["payloads"] = "96";
         video_media["port"] = candidate["port"];
         video_media["protocol"] = "UDP/TLS/RTP/SAVPF";
@@ -672,15 +672,15 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
         video_media["ssrcGroups"].push_back(ssrc_group);
 
         // "groups":[{"mids":"audio video","type":"BUNDLE"}]
-        group_bundle["mids"] = "audio video";
+        group_bundle["mids"] = "0 1";
         group_bundle["type"] = "BUNDLE";
         sdp["groups"].push_back(group_bundle);
         sdp["media"].push_back(audio_media);
         sdp["media"].push_back(video_media);
 
-        sdp["connection"]["ip"] = "192.168.3.236";
+        sdp["connection"]["ip"] = "192.168.32.80";
         sdp["connection"]["version"] = 4;
-        sdp["origin"]["address"] = "192.168.3.236";
+        sdp["origin"]["address"] = "192.168.32.80";
         sdp["origin"]["ipVer"] = 4;
         sdp["origin"]["netType"] = "IN";
         sdp["origin"]["sessionId"] = 1548754406600;

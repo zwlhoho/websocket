@@ -361,6 +361,13 @@ int main(int argc, const char *argv[]) {
         request_handle(listenfd, events, nfds, epfd);
     }
 
+    {
+        // close client socket
+        std::map<int, CLIENT_STATE>::iterator it = g_clientState.begin();
+        for ( ; it != g_clientState.end(); ++it) {
+            close(it->first);
+        }
+    }
     close(listenfd);
     close(epfd);
 }
