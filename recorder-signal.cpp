@@ -8,9 +8,10 @@
 #include "mediaserver/rtp/RTPIncomingSourceGroup.h"
 #include "mediaserver/mp4recorder.h"
 #include "uuid/uuid.h"
+#include "wsServer2.h"
 
 using json = nlohmann::json;
-const static std::string g_localip("192.168.36.21");
+const static std::string g_localip("192.168.32.89");
  MP4Recorder *recorder;
 typedef enum {
 	WSOC_CONTINUATION = 0x0,
@@ -42,28 +43,42 @@ void recorder_signal_handle(FDInfo *fdInfo) {
     }
 }
 
-std::string doHandleRequest(std::string msgtype, json requestParam, FDInfo *fdInfo) {
+void recorder_signal_handle(const char *signal_data, int dataLen, std::string &response, struct lws* wsi) {
+    try {
+        if (0 == strcmp(signal_data, "ping")) {
+            response = "pong";
+            return ;
+        }
+        json requestParam = json::parse(signal_data);
+        std::cout << requestParam["msgtype"] << std::endl;
+        response = doHandleRequest(requestParam["msgtype"], requestParam, wsi);        
+    } catch (std::exception e) {
+        std::cout << "Parse msg failed! " << e.what() << std::endl;
+    }
+}
+
+std::string doHandleRequest(std::string msgtype, json requestParam, struct lws* wsi) {
     std::string result("");
     std::string fromuser = requestParam["fromuser"].get<std::string>();
     std::cout << "msgtype: " << msgtype << " request params: " << requestParam << std::endl;
     if (0 == msgtype.compare("login")) {
         std::cout << "login " << std::endl;
-    } else if (0 == msgtype.compare("EventRinging")) {
+    } else if (0 == msgtype.compare("EventRinging") || 0 == msgtype.compare("RequestMakeCall")) {
         std::string sdpStr = requestParam["content"];
-        std::cout << "EventRinging" << std::endl;
         std::cout << "SDP: " << sdpStr;
 
         json offerSDP = sdptransform::parse(sdpStr);
         try {
             std::string sdp_str = inviteHandle(offerSDP, fromuser);
             json response;
-            response["msgtype"] = "RequestAnswerCall";
+            response["msgtype"] = "EventEstablish";
             response["content"] = sdp_str;
-            response["touser"] = "1010";
+            response["touser"] = fromuser;
+            response["fromuser"] = requestParam["touser"];
             std::string res_str = response.dump();
             std::cout << "response str: " << res_str <<std::endl;
 
-            ws_write_frame(fdInfo->GetFD(), WSOC_TEXT, (void *)res_str.c_str(), res_str.length());
+            return res_str;
         } catch (std::exception e) {
             std::cout << "Invite Handle Failed!\n" << e.what() << std::endl;
         }
@@ -111,6 +126,119 @@ std::string doHandleRequest(std::string msgtype, json requestParam, FDInfo *fdIn
             recorder->Stop();
             recorder->Close(false);
         }
+    } else if (0 == msgtype.compare("RequestRegister")) {
+        json response;
+        response["msgtype"] = "EventRegistered";
+        response["fromuser"] = requestParam["fromuser"];
+        response["recorder"] = "cppRecorder";
+        response["turn"] = "turn:192.168.32.89";
+        response["turnu"] = "test";
+        response["turnp"] = "1234";
+        std::string res_str = response.dump();
+        std::cout << "response str: " << res_str <<std::endl;
+        userRegister(requestParam["fromuser"], wsi);
+        return res_str;
+    } else if (0 == msgtype.compare("RequestJoinConference")) {
+        json response;
+        response["msgtype"] = "EventJoinSucc";
+        response["fromuser"] = requestParam["fromuser"];
+        response["chatroom"] = requestParam["chatroom"];
+        response["recorder"] = "cppRecorder";
+        response["turn"] = "turn:192.168.32.89";
+        response["turnu"] = "test";
+        response["turnp"] = "1234";
+        std::string res_str = response.dump();
+        std::cout << "response str: " << res_str <<std::endl;
+        // sendToUser(requestParam["fromuser"], res_str);
+
+        // response.clear();
+        // response["msgtype"] = "EventPartyAdded";
+        // response["fromuser"] = "cppRecorder";
+        // response["chatroom"] = requestParam["chatroom"];
+        // response["touser"] = requestParam["fromuser"];
+        // res_str = response.dump();
+        return res_str;
+    }
+    return result;
+}
+
+std::string doHandleRequest(std::string msgtype, json requestParam, FDInfo *fdInfo) {
+    std::string result("");
+    std::string fromuser = requestParam["fromuser"].get<std::string>();
+    std::cout << "msgtype: " << msgtype << " request params: " << requestParam << std::endl;
+    if (0 == msgtype.compare("login")) {
+        std::cout << "login " << std::endl;
+    } else if (0 == msgtype.compare("EventRinging")) {
+        std::string sdpStr = requestParam["content"];
+        std::cout << "EventRinging" << std::endl;
+        std::cout << "SDP: " << sdpStr;
+
+        json offerSDP = sdptransform::parse(sdpStr);
+        try {
+            std::string sdp_str = inviteHandle(offerSDP, fromuser);
+            json response;
+            response["msgtype"] = "RequestAnswerCall";
+            response["content"] = sdp_str;
+            response["touser"] = "1010";
+            std::string res_str = response.dump();
+            std::cout << "response str: " << res_str <<std::endl;
+
+            // ws_write_frame(fdInfo->GetFD(), WSOC_TEXT, (void *)res_str.c_str(), res_str.length());
+        } catch (std::exception e) {
+            std::cout << "Invite Handle Failed!\n" << e.what() << std::endl;
+        }
+    } else if (0 == msgtype.compare("EventReleased")) {
+        std::map<std::string, RTPBundleInfo>::iterator it;
+        it = g_fromuserRTPBundleInfo.find(fromuser);
+        if (it != g_fromuserRTPBundleInfo.end()) {
+            RTPBundleInfo bundleInfo = it->second;
+            if (NULL != bundleInfo.bundle) {
+                bundleInfo.bundle->End();
+                delete bundleInfo.bundle;
+                bundleInfo.bundle = NULL;
+            }
+            if (NULL != bundleInfo.transport) {
+                if (NULL != bundleInfo.audioIncomingSource) {
+                    bundleInfo.transport->RemoveIncomingSourceGroup(bundleInfo.audioIncomingSource);
+                    delete bundleInfo.audioIncomingSource;
+                    bundleInfo.audioIncomingSource = NULL;
+                }
+                if (NULL != bundleInfo.videoIncomingSource) {
+                    bundleInfo.transport->RemoveIncomingSourceGroup(bundleInfo.videoIncomingSource);
+                    delete bundleInfo.videoIncomingSource;
+                    bundleInfo.videoIncomingSource = NULL;
+                }
+                bundleInfo.transport->Stop();
+                delete bundleInfo.transport;
+                bundleInfo.transport = NULL;
+            }
+
+            if (NULL != bundleInfo.videoIncomingSource) {
+                bundleInfo.videoIncomingSource->Stop();
+                delete bundleInfo.videoIncomingSource;
+                bundleInfo.videoIncomingSource = NULL;
+            }
+
+            if (NULL != bundleInfo.audioIncomingSource) {
+                bundleInfo.audioIncomingSource->Stop();
+                delete bundleInfo.audioIncomingSource;
+                bundleInfo.audioIncomingSource = NULL;
+            }
+
+            g_fromuserRTPBundleInfo.erase(it);
+        }
+        if (NULL != recorder) {
+            recorder->Stop();
+            recorder->Close(false);
+        }
+    } else if (0 == msgtype.compare("RequestRegister")) {
+        json response;
+        response["msgtype"] = "EventRegistered";
+        response["fromuser"] = requestParam["fromuser"];
+        response["recorder"] = "cppRecorder";
+        std::string res_str = response.dump();
+        std::cout << "response str: " << res_str <<std::endl;
+        return res_str;
     }
     return result;
 }
@@ -308,7 +436,7 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
     
     // std::cout << "candaidate: " << candidate << std::endl;
 
-    std::cout << "------------------------------------------- " << __LINE__ << std::endl;
+    std::cout << "------------------finger print "<< fingerprint << "------------------------- " << __LINE__ << std::endl;
     json g_ice;
     g_ice["ufrag"] = "abcd";
     g_ice["pwd"] = "1234567890abcdefghijklmnopqrstuvwxy";
@@ -678,9 +806,9 @@ std::string inviteHandle(json offerSDP, std::string fromuser) {
         sdp["media"].push_back(audio_media);
         sdp["media"].push_back(video_media);
 
-        sdp["connection"]["ip"] = "192.168.32.80";
+        sdp["connection"]["ip"] = "192.168.32.89";
         sdp["connection"]["version"] = 4;
-        sdp["origin"]["address"] = "192.168.32.80";
+        sdp["origin"]["address"] = "192.168.32.89";
         sdp["origin"]["ipVer"] = 4;
         sdp["origin"]["netType"] = "IN";
         sdp["origin"]["sessionId"] = 1548754406600;
